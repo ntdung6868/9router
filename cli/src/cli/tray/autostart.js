@@ -110,6 +110,34 @@ function isAutoStartEnabled() {
 
 // ============ macOS ============
 
+/**
+ * Returns true when the current Node process IS the running instance that
+ * launchd is managing under our agent label.
+ *
+ * `launchctl unload <plist>` (and `load`) for an Aqua user-domain agent sends
+ * SIGTERM to the running process. When the running 9router cli.js was itself
+ * spawned by the autostart launchd agent (i.e. user enabled autostart at
+ * some point, then rebooted, then clicked the tray icon's "Disable
+ * Auto-start" menu item), an unload would kill the very process executing
+ * the click handler — and the tray icon would disappear instead of the menu
+ * label flipping back to "Enable Auto-start". This helper lets the enable
+ * and disable paths sidestep that by skipping launchctl when we'd otherwise
+ * be killing ourselves.
+ */
+function isAgentSelfMacOS() {
+  try {
+    const output = execSync(`launchctl list ${APP_LABEL}`, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000
+    });
+    const match = output.match(/"PID"\s*=\s*(\d+)/);
+    return !!(match && parseInt(match[1], 10) === process.pid);
+  } catch (e) {
+    return false;
+  }
+}
+
 function enableMacOS(cliPath) {
   const launchAgentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
   const plistPath = path.join(launchAgentsDir, `${APP_LABEL}.plist`);
@@ -162,6 +190,14 @@ function enableMacOS(cliPath) {
 
   fs.writeFileSync(plistPath, plistContent);
 
+  // If we're the running agent already, launchctl unload/load would send
+  // ourselves SIGTERM. Skip it — the plist file is updated on disk and
+  // launchd will pick it up at next login. isAutoStartEnabled() will still
+  // return true because launchctl already has the agent loaded.
+  if (isAgentSelfMacOS()) {
+    return true;
+  }
+
   // Register with launchd in the current session. Without this, the agent
   // only takes effect on the next user login and the user has no signal that
   // anything actually happened. `unload` first defends against re-enable
@@ -180,9 +216,18 @@ function enableMacOS(cliPath) {
 
 function disableMacOS() {
   const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${APP_LABEL}.plist`);
-  try {
-    execSync(`launchctl unload "${plistPath}"`, { stdio: "ignore" });
-  } catch (e) {}
+
+  // Don't kill ourselves: when the current process is the running agent,
+  // `launchctl unload` would send SIGTERM and the user clicking
+  // "Disable Auto-start" from the tray menu would lose their tray icon
+  // instead of just flipping the menu label. Skip the unload — removing the
+  // plist file is enough to prevent the agent from starting on next login.
+  if (!isAgentSelfMacOS()) {
+    try {
+      execSync(`launchctl unload "${plistPath}"`, { stdio: "ignore" });
+    } catch (e) {}
+  }
+
   if (fs.existsSync(plistPath)) {
     fs.unlinkSync(plistPath);
   }
