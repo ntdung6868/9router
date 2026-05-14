@@ -82,18 +82,22 @@ export default function Sidebar({ onClose }) {
     return pathname.startsWith(href);
   };
 
-  const getUpdaterStatusUrl = () => {
-    const hostname = ["", "0.0.0.0", "localhost"].includes(globalThis.location.hostname)
-      ? "127.0.0.1"
-      : globalThis.location.hostname;
-    return `${globalThis.location.protocol}//${hostname}:${UPDATER_CONFIG.statusPort}/update/status`;
-  };
+  // Updater status server binds to 127.0.0.1 over plain HTTP. Always poll
+  // loopback HTTP regardless of the dashboard's own scheme/host so the request
+  // is not blocked by mixed-content (HTTPS dashboard -> HTTP updater) or sent
+  // to an unreachable hostname (dashboard accessed via tunnel/remote host).
+  const getUpdaterStatusUrl = () =>
+    `http://127.0.0.1:${UPDATER_CONFIG.statusPort}/update/status`;
 
   const pollUpdateStatus = () => {
+    let lastContactAt = Date.now();
+    const noContactTimeoutMs = UPDATER_CONFIG.statusPollNoContactTimeoutMs;
+
     const poll = async () => {
       try {
         const res = await fetch(getUpdaterStatusUrl(), { cache: "no-store" });
         if (res.ok) {
+          lastContactAt = Date.now();
           const data = await res.json();
           setUpdateStatus(data);
           if (data.done) {
@@ -105,6 +109,13 @@ export default function Sidebar({ onClose }) {
           }
         }
       } catch { /* updater may still be starting */ }
+
+      if (Date.now() - lastContactAt > noContactTimeoutMs) {
+        setUpdateError("Automatic updater did not respond. You can install manually instead.");
+        setShowManualUpdate(true);
+        return;
+      }
+
       updatePollTimerRef.current = setTimeout(poll, UPDATER_CONFIG.statusPollIntervalMs);
     };
     updatePollTimerRef.current = setTimeout(poll, UPDATER_CONFIG.statusPollIntervalMs);
