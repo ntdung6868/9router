@@ -255,8 +255,21 @@ function killAllAppProcesses(appPort) {
         }
       }
 
-      // Kill all found processes
+      // Kill all found processes.
+      //
+      // SIGSTOP-then-SIGKILL on Unix: if we just walk the list and SIGKILL each
+      // PID in turn, killing the next-server child first lets the parent cli.js's
+      // `server.on("close")` handler fire and run tryRestart() — spawning a new
+      // next-server with a fresh PID that's not in our kill list. The orphan
+      // keeps holding port :20128 and breaks Hide-to-Tray takeover. Freezing
+      // every matched parent first (SIGSTOP) blocks tryRestart from ever
+      // firing, so the subsequent SIGKILL is race-free.
       if (pids.length > 0) {
+        if (platform !== "win32") {
+          pids.forEach(pid => {
+            try { execSync(`kill -STOP ${pid} 2>/dev/null`, { stdio: 'ignore', timeout: 1000 }); } catch { /* already gone */ }
+          });
+        }
         pids.forEach(pid => {
           try {
             if (platform === "win32") {
@@ -709,6 +722,11 @@ function startServer(latestVersion) {
           console.log(`   • Open Dashboard`);
           console.log(`   • Quit\n`);
 
+          // Mark shutting down BEFORE cleanup: cleanup() SIGKILLs our own
+          // next-server, which would otherwise trip server.on("close") →
+          // tryRestart() and spawn a stray server that fights the detached
+          // tray process for port :20128.
+          isShuttingDown = true;
           // Exit current process - background process takes over
           cleanup();
           process.exit(0);
